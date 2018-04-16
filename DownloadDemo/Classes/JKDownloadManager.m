@@ -10,64 +10,110 @@
 #import <objc/runtime.h>
 #import "NSString+JKDownload.h"
 #import <YTKKeyValueStore/YTKKeyValueStore.h>
+#import <AFNetworking/AFNetworking.h>
 
 #define DownloadTableName @"downloadTable"
+#define DownloadInfoChanged @"DownloadInfoChanged"
 
-@interface NSURLSessionTask (Download)
-@property (nonatomic, weak) JKDownloadTask *task;
+NSString *const JKDownloadStateKey = @"JKDownloadStateKey";
+NSString *const JKDownloadProgressKey = @"JKDownloadProgressKey";
+NSString *const JKDownloadDownloadTaskKey = @"JKDownloadDownloadTaskKey";
+
+@interface NSURL(JKDownload)
+@property (nonatomic, strong, readonly) NSString *savePath;
+@property (nonatomic, strong, readonly) NSString *md5Key;
 @end
 
-@implementation NSURLSessionTask (Download)
-
-- (void)setTask:(JKDownloadTask *)task
-{
-    objc_setAssociatedObject(self, @selector(task), task, OBJC_ASSOCIATION_ASSIGN);
-}
-
-- (JKDownloadTask *)task
-{
-    return objc_getAssociatedObject(self, _cmd);
-}
-
+@interface NSURLSessionTask (JKDownload)
+@property (nonatomic, strong) NSURL *URL;
+@property (nonatomic, strong, readonly) NSString *savePath;
+@property (nonatomic, strong, readonly) NSString *md5Key;
+@property (nonatomic, weak, readonly) JKDownloadTask *task;
 @end
 
 @interface JKDownloadTask()
 
 @property (nonatomic, strong, readwrite) NSURL *url;
 @property (nonatomic, assign, readwrite) JKDownloadTaskState state;
-@property (nonatomic, strong, readwrite) NSString *savePath;
-@property (nonatomic, strong, readwrite) NSString *md5Key;
-@property (nonatomic, assign, readwrite) NSUInteger resumLength;
 @property (nonatomic, assign, readwrite) NSUInteger totalLength;
 @property (nonatomic, assign, readwrite) NSUInteger currentLength;
-@property (nonatomic, strong, readwrite) NSURLSessionDataTask *task;
-
-@property (nonatomic, strong) NSOutputStream *stream;
-
+@property (nonatomic, strong, readwrite) NSURLSessionDownloadTask *task;
 @property (nonatomic, strong) NSDictionary *downloadInfo;
+
++ (instancetype)taskWithURLString:(NSString *)urlString;
 
 @end
 
-@interface JKDownloadManager ()<NSURLSessionDataDelegate>
-@property (nonatomic, strong) NSURLSession *session;
-@property (nonatomic, strong, readwrite) NSMutableSet<JKDownloadTask*> *tasks;
-@property (nonatomic, strong) NSMutableDictionary<NSString *, NSURLSessionDataTask *> *dataTasks;
+@interface JKDownloadManager ()<NSURLSessionDownloadDelegate>
+@property (nonatomic, strong) NSURLSession *sessionManager;
+@property (nonatomic, strong) NSURLSessionConfiguration *sessionConfiguration;
+@property (nonatomic, strong) NSMutableArray<NSURLSessionDownloadTask*> *downloadTasks;
+@property (nonatomic, strong) NSMutableArray<JKDownloadTask*> *jkDownloadTasks;
 @property (nonatomic, strong) YTKKeyValueStore *store;
 @property (nonatomic, assign) NSInteger downloadingNumber;
-- (NSURLSessionDataTask *)addDownloadTask:(JKDownloadTask *)task;
 - (void)startDownloadTask:(JKDownloadTask *)task;
 - (void)stopDownloadTask:(JKDownloadTask *)task;
 @end
 
-@implementation JKDownloadTask
+@implementation NSURL (JKDownload)
 
-- (NSOutputStream *)stream
+- (NSString *)savePath
 {
-    if (!_stream) {
-        _stream = [NSOutputStream outputStreamToFileAtPath:self.savePath append:YES];
-    }
-    return _stream;
+    NSString *path = [NSString pathForLibrary:self.md5Key inDir:@"jkdownload"];
+    return path;
 }
+
+- (NSString *)md5Key
+{
+    NSString *md5Key = [self.absoluteString md5String];
+    return md5Key;
+}
+
+@end
+
+@implementation NSURLSessionTask (JKDownload)
+
+- (NSString *)savePath
+{
+    return self.URL.savePath;
+}
+
+- (NSString *)md5Key
+{
+    return self.URL.md5Key;
+}
+
+- (JKDownloadTask *)task
+{
+    JKDownloadTask *task = objc_getAssociatedObject(self, _cmd);
+    return task;
+}
+
+- (void)setTask:(JKDownloadTask *)task
+{
+    objc_setAssociatedObject(self, @selector(task), task, OBJC_ASSOCIATION_ASSIGN);
+}
+
+- (NSURL *)URL
+{
+    NSURL *url = objc_getAssociatedObject(self, _cmd);
+    if (!url) {
+        url = self.originalRequest.URL;
+        if (!url) {
+            objc_setAssociatedObject(self, @selector(URL), url, OBJC_ASSOCIATION_RETAIN);
+        }
+    }
+    return url;
+}
+
+- (void)setURL:(NSURL *)URL
+{
+    objc_setAssociatedObject(self, @selector(URL), URL, OBJC_ASSOCIATION_RETAIN);
+}
+
+@end
+
+@implementation JKDownloadTask
 
 + (instancetype)taskWithURLString:(NSString *)urlString
 {
@@ -78,21 +124,75 @@
 {
     self = [super init];
     if (self) {
+        
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(downloadInfoChanged:) name:DownloadInfoChanged object:nil];
+        
         self.url = [NSURL URLWithString:urlString];
-        self.md5Key = [urlString md5String];
-        self.savePath = [NSString pathForLibrary:self.md5Key inDir:@"jkdownload"];
         NSDictionary *dic = [[JKDownloadManager shared].store getObjectById:self.md5Key fromTable:DownloadTableName];
         if (dic) {
             self.downloadInfo = dic;
             if (self.state == JKDownloadTaskStateDownloading) {
                 self.state = JKDownloadTaskStateResum;
             }
-            self.resumLength = self.currentLength;
+            if (self.state == JKDownloadTaskStateDone) {
+                self.currentLength = self.totalLength;
+            }
         } else {
             self.state = JKDownloadTaskStateReady;
         }
     }
     return self;
+}
+
+- (void)downloadInfoChanged:(NSNotification *)noti
+{
+    NSURLSessionDownloadTask *task = noti.userInfo[JKDownloadDownloadTaskKey];
+    NSString *url = task.URL.absoluteString;
+    if ([url isEqualToString:self.url.absoluteString]) {
+        
+        self.task = task;
+
+        NSNumber *state = noti.userInfo[JKDownloadStateKey];
+        if (state) {
+            self.state = [state unsignedIntegerValue];
+        }
+        
+        self.currentLength = task.countOfBytesReceived;
+        self.totalLength = task.countOfBytesExpectedToReceive;
+        
+        NSNumber *progress = noti.userInfo[JKDownloadProgressKey];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (progress && self.progressHandler) {
+                self.progressHandler(progress.floatValue);
+            }
+        });
+        
+        if (self.state == JKDownloadTaskStateDone) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (self.progressHandler) {
+                    self.progressHandler(1);
+                }
+            });
+        }
+        
+        if (progress.floatValue == 1) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (self.completionHandler) {
+                    self.completionHandler(task.error, task.savePath);
+                }
+            });
+        }
+    }
+}
+
+- (NSString *)savePath
+{
+    return self.url.savePath;
+}
+
+- (NSString *)md5Key
+{
+    return self.url.md5Key;
 }
 
 - (void)setState:(JKDownloadTaskState)state
@@ -119,7 +219,7 @@
 
 - (NSDictionary *)downloadInfo
 {
-    return @{@"state": @(self.state), @"resumLength": @(self.resumLength), @"totalLength": @(self.totalLength), @"currentLength": @(self.currentLength)};
+    return @{@"state": @(self.state), @"totalLength": @(self.totalLength), @"currentLength": @(self.currentLength)};
 }
 
 - (void)setDownloadInfo:(NSDictionary *)downloadInfo
@@ -135,14 +235,6 @@
 
 static JKDownloadManager *_shared = nil;
 
-- (NSURLSession *)session
-{
-    if (!_session) {
-        _session = [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration defaultSessionConfiguration] delegate:self delegateQueue:[[NSOperationQueue alloc] init]];
-    }
-    return _session;
-}
-
 - (YTKKeyValueStore *)store
 {
     if (!_store) {
@@ -154,16 +246,38 @@ static JKDownloadManager *_shared = nil;
     return _store;
 }
 
+- (NSURLSessionConfiguration *)sessionConfiguration
+{
+    if (!_sessionConfiguration) {
+        _sessionConfiguration = [NSURLSessionConfiguration backgroundSessionConfigurationWithIdentifier:[NSBundle mainBundle].bundleIdentifier];
+    }
+    return _sessionConfiguration;
+}
+
 + (instancetype)shared
 {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         _shared = [[JKDownloadManager alloc] init];
-        _shared.maxNumberOfTasks = 3;
-        _shared.tasks = [NSMutableSet set];
-        _shared.dataTasks = [NSMutableDictionary dictionary];
     });
     return _shared;
+}
+
+- (instancetype)init
+{
+    self = [super init];
+    if (self) {
+        self.maxNumberOfTasks = 3;
+        self.jkDownloadTasks = [NSMutableArray array];
+        self.sessionManager = [NSURLSession sessionWithConfiguration:self.sessionConfiguration delegate:self delegateQueue:[NSOperationQueue new]];
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+        [self.sessionManager getTasksWithCompletionHandler:^(NSArray<NSURLSessionDataTask *> * _Nonnull dataTasks, NSArray<NSURLSessionUploadTask *> * _Nonnull uploadTasks, NSArray<NSURLSessionDownloadTask *> * _Nonnull downloadTasks) {
+            self.downloadTasks = [NSMutableArray arrayWithArray:downloadTasks];
+            dispatch_semaphore_signal(semaphore);
+        }];
+        dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+    }
+    return self;
 }
 
 - (void)setDownloadingNumber:(NSInteger)downloadingNumber
@@ -171,45 +285,53 @@ static JKDownloadManager *_shared = nil;
     _downloadingNumber = MAX(0, downloadingNumber);
 }
 
-- (NSURLSessionDataTask *)dataTaskWithDownloadTask:(JKDownloadTask *)task
+- (NSArray<JKDownloadTask *> *)tasks
 {
-    NSURLSessionDataTask *dataTask = self.dataTasks[task.md5Key];
-    if (!dataTask) {
-        NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:task.url];
-        if (task.state == JKDownloadTaskStateResum) {
-            // 设置请求头
-            // Range : bytes=xxx-xxx，从已经下载的长度开始到文件总长度的最后都要下载
-            NSString *range = [NSString stringWithFormat:@"bytes=%zd-",  task.resumLength];
-            [request setValue:range forHTTPHeaderField:@"Range"];
-            
-            // 创建一个Data任务
-            dataTask = [self.session dataTaskWithRequest:request];
-        } else {
-            // 创建一个Data任务
-            dataTask = [self.session dataTaskWithRequest:request];
+    return self.jkDownloadTasks;
+}
+
+- (NSURLSessionDownloadTask *)dataTaskWithURL:(NSURL *)url
+{
+    NSURLSessionDownloadTask *dataTask = nil;
+    for (NSURLSessionDownloadTask *task in self.downloadTasks) {
+        if ([task.URL.absoluteString isEqualToString:url.absoluteString]) {
+            dataTask = task;
+            break;
         }
-        self.dataTasks[task.md5Key] = dataTask;
-        task.task = dataTask;
-        dataTask.task = task;
+    }
+    if (!dataTask || dataTask.state == NSURLSessionTaskStateCompleted) {
+        if ([[NSFileManager defaultManager] fileExistsAtPath:url.savePath]) {
+            // 创建一个断点续传任务
+            NSData *data = [NSData dataWithContentsOfFile:url.savePath];
+            dataTask = [self.sessionManager downloadTaskWithResumeData:data];
+        } else {
+            // 创建一个普通任务
+            NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+            dataTask = [self.sessionManager downloadTaskWithRequest:request];
+        }
+        dataTask.URL = url;
     }
     return dataTask;
 }
 
 - (void)startDownloadTask:(JKDownloadTask *)task
 {
-    NSURLSessionDataTask *dataTask = task.task;
-    if (!dataTask) {
-        dataTask = [[JKDownloadManager shared] addDownloadTask:task];
-    }
-    if (dataTask.state != NSURLSessionTaskStateRunning) {
-        if (task.state != JKDownloadTaskStateDone) {
-            if (self.downloadingNumber < self.maxNumberOfTasks) {
+    if (task.state != JKDownloadTaskStateDone) {
+        if (self.downloadingNumber < self.maxNumberOfTasks) {
+            NSURLSessionDownloadTask *dataTask = task.task;
+            if (!dataTask || dataTask.state == NSURLSessionTaskStateCompleted) {
+                dataTask = [self dataTaskWithURL:task.url];
+                task.task = dataTask;
+                dataTask.task = task;
+                [self.downloadTasks addObject:dataTask];
+            }
+            if (dataTask.state != NSURLSessionTaskStateRunning) {
                 [dataTask resume];
                 self.downloadingNumber += 1;
                 task.state = JKDownloadTaskStateDownloading;
-            } else {
-                task.state = JKDownloadTaskStateWait;
             }
+        } else {
+            task.state = JKDownloadTaskStateWait;
         }
     }
 }
@@ -239,15 +361,18 @@ static JKDownloadManager *_shared = nil;
         return;
     }
     
-    NSURLSessionDataTask *dataTask = task.task;
-    
-    if (!dataTask) {
-        dataTask = [[JKDownloadManager shared] addDownloadTask:task];
-    }
+    NSURLSessionDownloadTask *dataTask = task.task;
     
     if (dataTask.state == NSURLSessionTaskStateRunning) {
         self.downloadingNumber -= 1;
         [dataTask suspend];
+//        [dataTask cancel];
+        [dataTask cancelByProducingResumeData:^(NSData * _Nullable resumeData) {
+//            NSString *savePath = dataTask.savePath;
+//            [[NSFileManager defaultManager] removeItemAtPath:savePath error:nil];
+//            [resumeData writeToFile:savePath atomically:YES];
+        }];
+
     }
     
     task.state = JKDownloadTaskStateResum;
@@ -261,118 +386,43 @@ static JKDownloadManager *_shared = nil;
     }
 }
 
-- (void)removeAllTasks
+- (void)deleteAllTasks
 {
-    self.downloadingNumber = 0;
-    
-    [self stopAllTasks];
-    
-    [self.tasks removeAllObjects];
-    [self.dataTasks removeAllObjects];
+    NSString *path = [NSString pathForLibrary:@"" inDir:@"jkdownload"];
+    [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+    [self.sessionManager invalidateAndCancel];
 }
 
-- (NSURLSessionDataTask *)addDownloadTask:(JKDownloadTask *)task
+- (JKDownloadTask *)addDownloadTaskWithUrlString:(NSString *)urlString
 {
-    [self.tasks addObject:task];
-    NSURLSessionDataTask *dataTask = [self dataTaskWithDownloadTask:task];
-    return dataTask;
+    JKDownloadTask *task = [JKDownloadTask taskWithURLString:urlString];
+    [self.jkDownloadTasks addObject:task];
+    return task;
 }
 
-- (void)removeDownloadTask:(JKDownloadTask *)task
+#pragma mark - <NSURLSessionDownloadDelegate>
+- (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)downloadTask
+      didWriteData:(int64_t)bytesWritten
+ totalBytesWritten:(int64_t)totalBytesWritten
+totalBytesExpectedToWrite:(int64_t)totalBytesExpectedToWrite
 {
-    [self stopDownloadTask:task];
-    
-    [self.tasks removeObject:task];
-    [self.dataTasks removeObjectForKey:task.md5Key];
-}
-
-#pragma mark - <NSURLSessionDataDelegate>
-/**
- * 1.接收到响应
- */
-- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveResponse:(NSHTTPURLResponse *)response completionHandler:(void (^)(NSURLSessionResponseDisposition))completionHandler
-{
-    if (response.statusCode == 200) {
-        dataTask.task.totalLength = dataTask.countOfBytesExpectedToReceive;
-    } else if (response.statusCode == 206) {
-        NSString *contentRange = [response.allHeaderFields valueForKey:@"Content-Range"];
-        if ([contentRange hasPrefix:@"bytes"]) {
-            //Content-Range: bytes 12367-200000/200000”说明了返回提供了请求资源所在的原始实体内的位置，还给出了整个资源的长度。
-            NSArray *bytes = [contentRange componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@" -/"]];
-            if ([bytes count] == 4) {
-                //self.totalCotentLength=200000;
-                dataTask.task.totalLength = [[bytes objectAtIndex:3] longLongValue];
-            } else {
-                dataTask.task.totalLength = [response.allHeaderFields[@"Content-Length"] integerValue] +  dataTask.task.resumLength;
-            }
-        } else {
-            dataTask.task.totalLength = [response.allHeaderFields[@"Content-Length"] integerValue] +  dataTask.task.resumLength;
-        }
-    } else if (response.statusCode == 416) {
-        NSString *contentRange = [response.allHeaderFields valueForKey:@"Content-Range"];
-        if ([contentRange hasPrefix:@"bytes"]) {
-            NSArray *bytes = [contentRange componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@" -/"]];
-            if ([bytes count] == 3) {
-                dataTask.task.totalLength = [[bytes objectAtIndex:2] longLongValue];
-                if (dataTask.task.currentLength == dataTask.task.totalLength) {
-                    //说明已下完
-//                    dispatch_async(dispatch_get_main_queue(), ^{
-//                        if (dataTask.task.completionHandler) {
-//                            dataTask.task.completionHandler(nil, dataTask.task.savePath);
-//                        }
-//                    });
-                }else{
-                    //416 Requested Range Not Satisfiable
-//                    NSError *error = [[NSError alloc] initWithDomain:[dataTask.task.url absoluteString] code:416 userInfo:response.allHeaderFields];
-//                    dispatch_async(dispatch_get_main_queue(), ^{
-//                        if (dataTask.task.completionHandler) {
-//                            dataTask.task.completionHandler(error, nil);
-//                        }
-//                    });
-                    //不能下载
-                    completionHandler(NSURLSessionResponseCancel);
-                    return;
-                }
-            } else {
-                dataTask.task.totalLength = [response.allHeaderFields[@"Content-Length"] integerValue] +  dataTask.task.resumLength;
-            }
-        } else {
-            dataTask.task.totalLength = [response.allHeaderFields[@"Content-Length"] integerValue] +  dataTask.task.resumLength;
-        }
- 
-    } else {
-        //不能下载
-        completionHandler(NSURLSessionResponseCancel);
-    }
-    
-    // 打开流
-    [dataTask.task.stream open];
+    //通知
+    float progress = 1.0 *  totalBytesWritten / totalBytesExpectedToWrite;
+    NSDictionary *dic = @{JKDownloadDownloadTaskKey: downloadTask,
+                          JKDownloadProgressKey: @(progress),
+                          JKDownloadStateKey: @(JKDownloadTaskStateDownloading)};
+    [[NSNotificationCenter defaultCenter] postNotificationName:DownloadInfoChanged object:nil userInfo:dic];
     
     //保存状态
-    [self.store putObject:dataTask.task.downloadInfo withId:dataTask.task.md5Key intoTable:DownloadTableName];
-
-    // 接收这个请求，允许接收服务器的数据
-    completionHandler(NSURLSessionResponseAllow);
+    NSDictionary *info = @{@"state": @(JKDownloadTaskStateDownloading), @"totalLength": @(totalBytesExpectedToWrite), @"currentLength": @(totalBytesWritten)};
+    [[JKDownloadManager shared].store putObject:info withId:downloadTask.md5Key intoTable:DownloadTableName];
+    
 }
 
-/**
- * 2.接收到服务器返回的数据（这个方法可能会被调用N次）
- */
-- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data
+- (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)downloadTask didFinishDownloadingToURL:(NSURL *)location
 {
-    // 写入数据
-    [dataTask.task.stream write:data.bytes maxLength:data.length];
-    dataTask.task.currentLength += data.length;
-    
-    //保存状态
-    [self.store putObject:dataTask.task.downloadInfo withId:dataTask.task.md5Key intoTable:DownloadTableName];
-    
-    float progress = 1.0 *  dataTask.task.currentLength / dataTask.task.totalLength;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (dataTask.task.progressHandler) {
-            dataTask.task.progressHandler(progress);
-        }
-    });
+    NSString *path = [NSString pathForLibrary:downloadTask.md5Key inDir:@"jkdownload"];
+    [[NSFileManager defaultManager] moveItemAtURL:location toURL:[NSURL fileURLWithPath:path] error:nil];
 }
 
 /**
@@ -380,29 +430,47 @@ static JKDownloadManager *_shared = nil;
  */
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error
 {
-    // 关闭流
-    [task.task.stream close];
+    JKDownloadTaskState state = JKDownloadTaskStateUnknown;
     
-    [self removeDownloadTask:task.task];
-
     if (error) {
-        task.task.state = JKDownloadTaskStateError;
+        NSLog(@"%@ 错误或者取消", task);
+        state = JKDownloadTaskStateError;
+        NSData *data = error.userInfo[NSURLSessionDownloadTaskResumeData];
+        if (data) {
+            NSLog(@"%@ 断点续传", task);
+            state = JKDownloadTaskStateResum;
+            NSString *savePath = task.savePath;
+            [[NSFileManager defaultManager] removeItemAtPath:savePath error:nil];
+            [data writeToFile:savePath atomically:YES];
+        }
     } else {
-        task.task.state = JKDownloadTaskStateDone;
+        NSLog(@"%@ 完成", task);
+        state = JKDownloadTaskStateDone;
     }
     
-    //保存状态
-    [self.store putObject:task.task.downloadInfo withId:task.task.md5Key intoTable:DownloadTableName];
+    //通知
+    NSDictionary *dic = @{JKDownloadDownloadTaskKey: task,
+                          JKDownloadStateKey: @(state)};
+    [[NSNotificationCenter defaultCenter] postNotificationName:DownloadInfoChanged object:nil userInfo:dic];
     
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (task.task.completionHandler) {
-            task.task.completionHandler(error, task.task.savePath);
-        }
-    });
+    //保存状态
+    NSMutableDictionary *info = [NSMutableDictionary dictionaryWithDictionary:[[JKDownloadManager shared].store getObjectById:task.md5Key fromTable:DownloadTableName]];
+    info[@"state"] = @(state);
+    [[JKDownloadManager shared].store putObject:info withId:task.md5Key intoTable:DownloadTableName];
     
     self.downloadingNumber -= 1;
 
     [self startAllWaitTasks];
+    
+}
+
+- (void)URLSessionDidFinishEventsForBackgroundURLSession:(NSURLSession *)session
+{
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self.backgroundCompletionHandler) {
+            self.backgroundCompletionHandler();
+        }
+    });
 }
 
 @end

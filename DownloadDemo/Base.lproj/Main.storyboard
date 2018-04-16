@@ -6,6 +6,7 @@
     <dependencies>
         <deployment identifier="iOS"/>
         <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="14088"/>
+        <capability name="Navigation items with more than one left or right bar item" minToolsVersion="7.0"/>
         <capability name="Safe area layout guides" minToolsVersion="9.0"/>
         <capability name="documents saved in the Xcode 8 format" minToolsVersion="8.0"/>
     </dependencies>
@@ -42,11 +43,18 @@
                                 <action selector="stopAll:" destination="BYZ-38-t0r" id="wBr-Im-Vvs"/>
                             </connections>
                         </barButtonItem>
-                        <barButtonItem key="rightBarButtonItem" title="全部开始" id="tEI-0F-ExJ">
-                            <connections>
-                                <action selector="startAll:" destination="BYZ-38-t0r" id="Vc6-Oo-F3T"/>
-                            </connections>
-                        </barButtonItem>
+                        <rightBarButtonItems>
+                            <barButtonItem title="全部开始" id="tEI-0F-ExJ">
+                                <connections>
+                                    <action selector="startAll:" destination="BYZ-38-t0r" id="Vc6-Oo-F3T"/>
+                                </connections>
+                            </barButtonItem>
+                            <barButtonItem title="全部删除" id="4mV-Pk-m4P">
+                                <connections>
+                                    <action selector="deleteAll:" destination="BYZ-38-t0r" id="cv9-BT-Wa8"/>
+                                </connections>
+                            </barButtonItem>
+                        </rightBarButtonItems>
                     </navigationItem>
                     <connections>
                         <outlet property="tableView" destination="XOG-Qm-X0H" id="T7F-7V-ZSX"/>

@@ -25,21 +25,17 @@ typedef void(^JKDownloadStateChangeHandler)(JKDownloadTaskState state);
 
 @interface JKDownloadTask : NSObject
 
-+ (instancetype)taskWithURLString:(NSString *)urlString;
-
 @property (nonatomic, strong, readonly) NSURL *url;
 @property (nonatomic, assign, readonly) JKDownloadTaskState state;
 @property (nonatomic, strong, readonly) NSString *savePath;
 @property (nonatomic, strong, readonly) NSString *md5Key;
 
-//上次下载中断的长度
-@property (nonatomic, assign, readonly) NSUInteger resumLength;
 //总长度
 @property (nonatomic, assign, readonly) NSUInteger totalLength;
 //已经下载的长度
 @property (nonatomic, assign, readonly) NSUInteger currentLength;
 
-@property (nonatomic, strong, readonly) NSURLSessionDataTask *task;
+@property (nonatomic, strong, readonly) NSURLSessionDownloadTask *task;
 
 @property (nonatomic, copy) JKDownloadProgressHandler progressHandler;
 @property (nonatomic, copy) JKDownloadCompletionHandler completionHandler;
@@ -57,12 +53,15 @@ typedef void(^JKDownloadStateChangeHandler)(JKDownloadTaskState state);
 //最大同时下载数 默认3
 @property (nonatomic, assign) NSUInteger maxNumberOfTasks;
 
-@property (nonatomic, strong, readonly) NSMutableSet<JKDownloadTask*> *tasks;
+@property (nonatomic, strong, readonly) NSArray<JKDownloadTask*> *tasks;
 
-- (NSURLSessionDataTask *)addDownloadTask:(JKDownloadTask *)task;
+- (JKDownloadTask *)addDownloadTaskWithUrlString:(NSString *)urlString;
 
 - (void)startAllTasks;
 - (void)stopAllTasks;
-- (void)removeAllTasks;
+- (void)deleteAllTasks;
+
+//在app delegate里面赋值
+@property (nonatomic, copy) void (^backgroundCompletionHandler)(void);
 
 @end

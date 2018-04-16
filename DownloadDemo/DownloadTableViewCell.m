@@ -76,6 +76,7 @@
     [super prepareForReuse];
     self.task.progressHandler = nil;
     self.task.completionHandler = nil;
+    self.task.stateChangeHandler = nil;
 }
 
 - (void)setSelected:(BOOL)selected animated:(BOOL)animated {

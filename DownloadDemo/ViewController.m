@@ -25,11 +25,10 @@
     self.tableView.rowHeight = 88;
     
     //https://www.yidiudiu.org/heikiz/video/se002/05mansu.wav
-    for (int i=0; i<15; i++) {
+    for (int i=0; i<14; i++) {
         NSString *url = [NSString stringWithFormat:@"https://www.yidiudiu.org/heikiz/video/se0%.2d/05mansu.wav", i+1];
-        JKDownloadTask *task = [JKDownloadTask taskWithURLString:url];
+        JKDownloadTask *task = [[JKDownloadManager shared] addDownloadTaskWithUrlString:url];
         [self.tasks addObject:task];
-        [[JKDownloadManager shared] addDownloadTask:task];
     }
     
 }
@@ -41,6 +40,11 @@
 - (IBAction)stopAll:(UIBarButtonItem *)sender {
     [[JKDownloadManager shared] stopAllTasks];
 }
+
+- (IBAction)deleteAll:(UIBarButtonItem *)sender {
+    [[JKDownloadManager shared] deleteAllTasks];
+}
+
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section
 {
